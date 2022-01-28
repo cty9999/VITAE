@@ -19,6 +19,11 @@ import matplotlib.pyplot as plt
 from scipy import stats
 import scanpy as sc
 import matplotlib.patheffects as pe
+from .utils import _nan2zero
+
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
 
 class VITAE():
     """
@@ -216,6 +221,7 @@ class VITAE():
     def update_z(self):
         self.z = self.get_latent_z()        
         self._adata_z = sc.AnnData(self.z)
+        #self._adata_z = _nan2zero(self._adata_z)
         sc.pp.neighbors(self._adata_z)
 
             
@@ -469,7 +475,7 @@ class VITAE():
             early_stopping_patience: int = 10, early_stopping_tolerance: float = 0.01, 
             early_stopping_relative: bool = True, early_stopping_warmup: int = 0,
           #  path_to_weights: Optional[str] = None, 
-            verbose: bool = False, **kwargs):
+            verbose: bool = False, divergence_alpha = 0,**kwargs):
         '''Train the model.
 
         Parameters
@@ -553,6 +559,7 @@ class VITAE():
             early_stopping_relative,
             early_stopping_warmup,  
             verbose,
+            divergence_alpha = divergence_alpha,
             **kwargs            
             )
         
@@ -990,3 +997,24 @@ class VITAE():
 
         # res['score_cos_theta'] = score_cos_theta/(np.sum(np.sum(w>0, axis=-1)==2)+1e-12)
         return res
+
+
+
+    def get_knn_accuracy(self,labels, k=20):
+
+        if isinstance(labels, str):
+            y = self.adata.obs[labels].values
+        else:
+            y = np.squeeze(np.array(labels))
+
+        X = self.z
+        neigh = KNeighborsClassifier(n_neighbors=k)
+        neigh.fit(X, y)
+        predcied_y = [neigh.predict([X[i, :]])[0] for i in range(X.shape[0])]
+
+        acc = accuracy_score(y, predcied_y)
+
+        data = confusion_matrix(y, predcied_y, labels=list(set(np.squeeze(y))))
+        cm = pd.DataFrame(index=list(set(np.squeeze(y))), columns=list(set(np.squeeze(y))), data=data)
+
+        return acc, cm
