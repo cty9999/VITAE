@@ -117,7 +117,7 @@ def pre_train(train_dataset, test_dataset, vae, learning_rate: float, L: int, al
             with tf.GradientTape() as tape:
                 losses = vae(x_norm_batch, c_score, x_batch, x_scale_factor, pre_train=True, L=L, alpha=alpha, gamma = gamma, conditions = x_condition)
                 # Compute reconstruction loss
-                loss = tf.reduce_sum(losses[0])
+                loss = tf.reduce_sum(losses[0:2])
             grads = tape.gradient(loss, vae.trainable_weights,
                         unconnected_gradients=tf.UnconnectedGradients.ZERO)
             optimizer.apply_gradients(zip(grads, vae.trainable_weights))                                
@@ -125,11 +125,12 @@ def pre_train(train_dataset, test_dataset, vae, learning_rate: float, L: int, al
             
             if verbose:
                 if (step+1)%10==0 or step+1==num_step_per_epoch:
-                    progbar.update(step+1, [('Reconstructed Loss', float(loss))])
+                    values = [('Reconstructed Loss', float(losses[0])),('MMD Loss', float(losses[1]))]
+                    progbar.update(step+1, values)
                 
         for step, (x_batch, x_norm_batch, c_score, x_scale_factor, x_condition) in enumerate(test_dataset):
             losses = vae(x_norm_batch, c_score, x_batch, x_scale_factor, pre_train=True, L=L, alpha=alpha, gamma = gamma, conditions = x_condition)
-            loss = tf.reduce_sum(losses[0])
+            loss = tf.reduce_sum(losses[0:2])
             loss_test(loss)
 
         if verbose:
@@ -150,7 +151,7 @@ def train(train_dataset, test_dataset, vae,
         L: int, alpha: float, beta: float, gamma: float,
         num_epoch: int, num_step_per_epoch: int, 
         es_patience: int, es_tolerance: float, es_relative: bool, es_warmup: int, 
-        verbose: bool = False, **kwargs):
+        verbose: bool = False, divergence_alpha = 0, **kwargs):
     '''Training.
 
     Parameters
@@ -191,12 +192,12 @@ def train(train_dataset, test_dataset, vae,
     '''   
     optimizer_ = tf.keras.optimizers.Adam(learning_rate)
     optimizer = tf.keras.optimizers.Adam(learning_rate)
-    loss_test = [tf.keras.metrics.Mean() for _ in range(4)]
-    loss_train = [tf.keras.metrics.Mean() for _ in range(4)]
+    loss_test = [tf.keras.metrics.Mean() for _ in range(5)]
+    loss_train = [tf.keras.metrics.Mean() for _ in range(5)]
     early_stopping = Early_Stopping(patience = es_patience, tolerance = es_tolerance, relative=es_relative, warmup=es_warmup)
 
     print('Warmup:%d'%es_warmup)
-    weight = np.array([1,beta,beta], dtype=tf.keras.backend.floatx())
+    weight = np.array([1,1,beta,beta], dtype=tf.keras.backend.floatx())
     weight = tf.convert_to_tensor(weight)
     
     if not verbose:
@@ -215,15 +216,15 @@ def train(train_dataset, test_dataset, vae,
         for step, (x_batch, x_norm_batch, c_score, x_scale_factor, x_condition) in enumerate(train_dataset):
             if epoch<es_warmup:
                 with tf.GradientTape() as tape:
-                    losses = vae(x_norm_batch, c_score, x_batch, x_scale_factor, L=L, alpha=alpha, gamma = gamma, conditions = x_condition)
+                    losses = vae(x_norm_batch, c_score, x_batch, x_scale_factor, L=L, alpha=alpha, gamma = gamma, conditions = x_condition, divergence_alpha = divergence_alpha)
                     # Compute reconstruction loss
-                    loss = tf.reduce_sum(losses[1:])
+                    loss = tf.reduce_sum(losses[2:])
                 grads = tape.gradient(loss, vae.latent_space.trainable_weights,
                             unconnected_gradients=tf.UnconnectedGradients.ZERO)
                 optimizer_.apply_gradients(zip(grads, vae.latent_space.trainable_weights))
             else:
                 with tf.GradientTape() as tape:
-                    losses = vae(x_norm_batch, c_score, x_batch, x_scale_factor, L=L, alpha=alpha, gamma = gamma, conditions = x_condition)
+                    losses = vae(x_norm_batch, c_score, x_batch, x_scale_factor, L=L, alpha=alpha, gamma = gamma, conditions = x_condition, divergence_alpha = divergence_alpha)
                     # Compute reconstruction loss
                     loss = tf.reduce_sum(losses*weight)
                 grads = tape.gradient(loss, vae.trainable_weights,
@@ -233,14 +234,16 @@ def train(train_dataset, test_dataset, vae,
             loss_train[0](losses[0])
             loss_train[1](losses[1])
             loss_train[2](losses[2])
-            loss_train[3](loss)
+            loss_train[3](losses[3])
+            loss_train[4](loss)
 
             if verbose:
                 if (step+1)%10==0 or step+1==num_step_per_epoch:
                     progbar.update(step+1, [
                             ('loss_neg_E_nb'    ,   float(losses[0])),
-                            ('loss_neg_E_pz'    ,   float(losses[1])),
-                            ('loss_E_qzx   '    ,   float(losses[2])),
+                            ('loss_MMD', float(losses[1])),
+                            ('loss_neg_E_pz'    ,   float(losses[2])),
+                            ('loss_E_qzx   '    ,   float(losses[3])),
                             ('loss_total'       ,   float(loss))
                             ])
                         
@@ -250,22 +253,25 @@ def train(train_dataset, test_dataset, vae,
             loss_test[0](losses[0])
             loss_test[1](losses[1])
             loss_test[2](losses[2])
-            loss_test[3](loss)
-            
-        if early_stopping(float(loss_test[3].result())):
+            loss_test[3](losses[3])
+            loss_test[4](loss)
+
+        if early_stopping(float(loss_test[4].result())):
             print('Early stopping.')
             break
         
         if verbose:
-            print(' Training loss over epoch: %.4f (%.4f, %.4f, %.4f) Testing loss over epoch: %.4f (%.4f, %.4f, %.4f)' % (
-                float(loss_train[3].result()),
+            print(' Training loss over epoch: %.4f (%.4f, %.4f, %.4f, %.4f) Testing loss over epoch: %.4f (%.4f, %.4f, %.4f, %.4f)' % (
+                float(loss_train[4].result()),
                 float(loss_train[0].result()),
                 float(loss_train[1].result()),
                 float(loss_train[2].result()),
-                float(loss_test[3].result()),
+                float(loss_train[3].result()),
+                float(loss_test[4].result()),
                 float(loss_test[0].result()),
                 float(loss_test[1].result()),
-                float(loss_test[2].result())))
+                float(loss_test[2].result()),
+                float(loss_test[3].result())))
 
         [l.reset_states() for l in loss_train]
         [l.reset_states() for l in loss_test]

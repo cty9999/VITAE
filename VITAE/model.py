@@ -6,7 +6,8 @@ from tensorflow.keras.utils import Progbar
 from .utils import compute_mmd, _nelem, _nan2zero, _nan2inf, _reduce_mean
 from tensorflow.keras import backend as K
 import time
-
+from sklearn.neighbors import NearestNeighbors
+from scipy.special import gamma
  
 class cdf_layer(Layer):
     '''
@@ -483,7 +484,7 @@ class LatentSpace(Layer):
         p_c_x = tf.exp(log_p_c_x).numpy()
         return p_c_x
 
-    def call(self, z, inference=False):
+    def call(self, z, inference=False, alpha_divergence=False):
         '''Get posterior estimations.
 
         Parameters
@@ -511,7 +512,10 @@ class LatentSpace(Layer):
         temp_pi, _inv_sig, _nu, beta_zc, log_eta0, eta1, eta2, log_p_zc_L, log_p_z_L, log_p_z = self.get_pz(z, eps)
 
         if not inference:
-            return log_p_z
+            if not alpha_divergence:
+                return log_p_z
+            else:
+                return log_p_z_L
         else:
             log_p_c_x = self._get_posterior_c(log_p_zc_L, log_p_z_L)
             w_tilde, var_w_tilde = self._get_inference(z, log_p_z_L, temp_pi, _inv_sig, _nu, beta_zc, log_eta0, eta1, eta2)
@@ -575,7 +579,7 @@ class VariationalAutoEncoder(tf.keras.Model):
         self.latent_space.initialize(mu, log_pi)
 
     def call(self, x_normalized, c_score, x = None, scale_factor = 1,
-             pre_train = False, L=1, alpha=0.0, gamma = 1.0, conditions = None):
+             pre_train = False, L=1, alpha=0.0, gamma = 1.0, conditions = None,divergence_alpha = 0.5):
         '''Feed forward through encoder, LatentSpace layer and decoder.
 
         Parameters
@@ -654,24 +658,19 @@ class VariationalAutoEncoder(tf.keras.Model):
                                 tf.tile(tf.expand_dims(c_score,1), (1,1,1))], -1)
             reconstruction_zero_loss = self._get_reconstruction_loss(x, zero_in, scale_factor, 1)
             reconstruction_z_loss = (1-alpha)*reconstruction_z_loss + alpha*reconstruction_zero_loss
-        
-        self.add_loss(reconstruction_z_loss + mmd_loss)
+        self.add_loss(reconstruction_z_loss)
+        self.add_loss(mmd_loss)
 
-        if not pre_train:        
-            log_p_z = self.latent_space(z, inference=False)
-
-            # - E_q[log p(z)]
+        if not pre_train:
+            log_p_z = self.latent_space(z, inference=False, alpha_divergence=False)
+            E_qzx = - tf.reduce_mean(0.5 * self.dim_latent *
+                        (tf.math.log(tf.constant(2 * np.pi, tf.keras.backend.floatx())) + 1.0) +
+                        0.5 * tf.reduce_sum(z_log_var, axis=-1))
             self.add_loss(- log_p_z)
-
-            # - Eq[log q(z|x)]
-            E_qzx = - tf.reduce_mean(
-                            0.5 * self.dim_latent *
-                            (tf.math.log(tf.constant(2 * np.pi, tf.keras.backend.floatx())) + 1.0) +
-                            0.5 * tf.reduce_sum(z_log_var, axis=-1)
-                            )
             self.add_loss(E_qzx)
+
         return self.losses
-    
+
     @tf.function
     def _get_reconstruction_loss(self, x, z_in, scale_factor, L):
         if self.data_type=='Gaussian':
