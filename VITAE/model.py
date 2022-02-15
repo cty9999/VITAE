@@ -713,7 +713,14 @@ class VariationalAutoEncoder(tf.keras.Model):
     def _mmd_loss(self, real_labels, y_pred, gamma, n_conditions, kernel_method='multi-scale-rbf',
                   computation_method="general"):
 
-        real_labels = K.reshape(K.cast(real_labels, 'int32'), (-1,))
+        real_labels = K.reshape(K.cast(real_labels, 'int32'), (-1,)).numpy()
+
+        ## real_labels may like [0,0,2,2] can cause tf.dynamic_partition bug
+        ## use reindex to make the categorical variable to be continuous
+        unique_set = list(set(real_labels))
+        reindex_dict = dict(zip(unique_set, range(n_conditions)))
+        real_labels = [reindex_dict[x] for x in real_labels]
+
         conditions_mmd = tf.dynamic_partition(y_pred, real_labels, num_partitions=n_conditions)
         loss = 0.0
         if computation_method.isdigit():
